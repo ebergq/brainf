@@ -1,5 +1,6 @@
 BIN_DIR = bin
 MKDIR_P = mkdir -p
+HS_SRC = src/haskell/Main.hs
 
 .PHONY: directories cleanall
 
@@ -14,8 +15,9 @@ clean:
 	@rm -rf $(BIN_DIR)
 
 # Haskell
-$(BIN_DIR)/haskell.bf.out: src/haskell/Main.hs directories
-	@ghc -o $(BIN_DIR)/haskell.bf.out src/haskell/Main.hs -outputdir $(BIN_DIR)
+$(BIN_DIR)/haskell.bf.out: $(HS_SRC) directories
+	@hlint $(HS_SRC)
+	@ghc -o $(BIN_DIR)/haskell.bf.out $(HS_SRC) -outputdir $(BIN_DIR)
 
 haskell: $(BIN_DIR)/haskell.bf.out
 

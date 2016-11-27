@@ -1,7 +1,7 @@
 import           Control.Monad.State
 import           Data.Char (ord, chr)
 import qualified Data.Map as M
-import           Data.Maybe (fromJust)
+import           Data.Maybe (fromJust, fromMaybe)
 import           System.IO
 
 type InstructionState = (M.Map Int Char, M.Map Int Int)
@@ -23,7 +23,7 @@ data ProgramState = ProgramState
   deriving (Eq, Show)
 
 getData :: ProgramState -> Int
-getData s = maybe 0 id (M.lookup (dataPtr s) (dataState s))
+getData s = fromMaybe 0 (M.lookup (dataPtr s) (dataState s))
 
 ------------------------------------------------------------------------------
 -- | initialize - Creates the initial program state from the instructions and
@@ -145,13 +145,13 @@ execute program = evalState brainf . initialize program
 
 play :: Handle -> IO ()
 play h = do
-    [n, m]  <- hGetLine h >>= return . map read . words
-    input   <- hGetLine h >>= return . take n
-    program <- liftM (filter isCommand . unlines) (replicateM m (hGetLine h))
+    [n, m]  <- fmap (map read . words) (hGetLine h)
+    input   <- fmap (take n) (hGetLine h)
+    program <- fmap (filter isCommand . unlines) (replicateM m (hGetLine h))
     putStrLn $ execute program input
   where
     isCommand :: Char -> Bool
-    isCommand c = elem c "+-<>.,[]"
+    isCommand c = c `elem` "+-<>.,[]"
 
 test :: FilePath -> IO ()
 test filePath = openFile filePath ReadMode >>= play
