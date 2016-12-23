@@ -1,160 +1,116 @@
-import           Control.Monad.State
-import           Data.Char (ord, chr)
-import qualified Data.Map as M
-import           Data.Maybe (fromJust, fromMaybe)
-import           System.IO
+import Control.Monad (unless, when)
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans (MonadTrans, lift)
+import Control.Monad.Trans.Except
+import Control.Monad.Trans.State
+import Data.Char
+import Data.Word
+import System.IO
+import Text.ParserCombinators.Parsec
+import Text.Parsec.Error
 
-type InstructionState = (M.Map Int Char, M.Map Int Int)
-type DataState = M.Map Int Int
+($>) :: Functor f => f a -> b -> f b
+($>) = flip $ fmap . const
 
-type Program = String
-type Input = String
-type Output = String
+type Byte = Word8
+type Tape = ([Byte], Byte, [Byte])
+type Input = [Word8]
+type BrainfState = (Tape, Input, Integer)
+data BrainfError = Overflow | PError ParseError
+  deriving Eq
 
-data ProgramState = ProgramState
-    { instrPtr   :: Int
-    , dataPtr    :: Int
-    , nbrOfOps   :: Int
-    , instrState :: InstructionState
-    , dataState  :: DataState
-    , input      :: Input
-    , output     :: Output
-    }
-  deriving (Eq, Show)
+instance Show BrainfError where
+  show e = case e of
+    Overflow  -> "\nPROCESS TIME OUT. KILLED!!!"
+    PError pe -> "PError: " ++ show pe
 
-getData :: ProgramState -> Int
-getData s = fromMaybe 0 (M.lookup (dataPtr s) (dataState s))
+type Brainf a = StateT BrainfState (ExceptT BrainfError IO) a
 
-------------------------------------------------------------------------------
--- | initialize - Creates the initial program state from the instructions and
---                the input.
-initialize :: Program -> Input -> ProgramState
-initialize program input = ProgramState
-    { instrPtr   = 0
-    , dataPtr    = 0
-    , nbrOfOps   = 0
-    , instrState = go 0 [] (M.empty, M.empty) program
-    , dataState  = M.empty
-    , input      = input
-    , output     = ""
-    }
+runBrainf :: Input -> Brainf a -> IO (Either BrainfError a)
+runBrainf i s = fmap (fmap fst) . runExceptT . runStateT s $ initialState
   where
-    go :: Int -> [Int] -> InstructionState -> String -> InstructionState
-    go _ _ ms []             = ms
-    go n pis (m1, m2) (c:cs) = case c of
-        '[' -> go (n+1) (n:pis) (m1', m2) cs
-        ']' -> go (n+1) (tail pis) (m1', m2') cs
-        _   -> go (n+1) pis (m1', m2) cs
-      where
-        m1' = M.insert n c m1
-        m2' = M.insert n (head pis) (M.insert (head pis) n m2)
+    initialState :: BrainfState
+    initialState = ((repeat 0, 0, repeat 0), i, 0)
+
+increaseCounter :: Brainf ()
+increaseCounter = modify (\(t, i, ctr) -> (t, i, ctr + 1))
+
+moveLeft :: Brainf ()
+moveLeft = modify (\((l:ls, b, rs), i, ctr) -> ((ls, l, b:rs), i, ctr))
+
+moveRight :: Brainf ()
+moveRight = modify (\((ls, b, r:rs), i, ctr) -> ((b:ls, r, rs), i, ctr))
+
+tick :: Brainf a -> Brainf a
+tick bf = do
+    (_, _, ctr) <- get
+    when (ctr >= 10^5) (lift $ throwE Overflow) >> increaseCounter >> bf
 
 ------------------------------------------------------------------------------
--- | brainf - State monad for executing BrainF__k programs.
-brainf :: State ProgramState Output
-brainf = do
-    s <- get
-    case isDone s of
-        Just o -> return o
-        _      -> case M.lookup (instrPtr s) (fst $ instrState s) of
-            Just c -> modify (getCommand c) >> brainf
-  where
-    getCommand :: Char -> (ProgramState -> ProgramState)
-    getCommand c = case c of
-        '+' -> modifyDataValue (return . maybe 1 (\x -> (x+1) `mod` 256))
-        '-' -> modifyDataValue (return . maybe 255 (\x -> (x-1) `mod` 256))
-        '>' -> modifyDataPtr (+1)
-        '<' -> modifyDataPtr (\x -> x-1)
-        '.' -> printOutput
-        ',' -> readInput
-        '[' -> openLoop
-        ']' -> closeLoop
-    isDone :: ProgramState -> Maybe Output
-    isDone s | isInstrPtrDone = return $ output s
-             | isOverflow     = return $ output s ++ timeoutMessage
-             | otherwise      = Nothing
-      where
-        isInstrPtrDone = instrPtr s >= M.size (fst $ instrState s)
-        isOverflow     = nbrOfOps s >= 10^5
-        timeoutMessage = "\nPROCESS TIME OUT. KILLED!!!"
+-- | withCurrent - Apply a function on the byte the data pointer is at
+withCurrent :: (Byte -> Byte) -> Brainf ()
+withCurrent f = modify (\((l, b, r), i, ctr) -> ((l, f b, r), i, ctr))
 
 ------------------------------------------------------------------------------
--- | openLoop - Handle start of a loop.
-openLoop :: ProgramState -> ProgramState
-openLoop s = s
-    { instrPtr = case getData s of
-        0 -> fromJust $ M.lookup (instrPtr s) (snd $ instrState s)
-        _ -> instrPtr s + 1
-    , nbrOfOps = nbrOfOps s + 1
-    }
+-- | withCurrentIO - Apply an IO operation on the byte the data pointer is at
+withCurrentIO :: (Byte -> IO Byte) -> Brainf ()
+withCurrentIO f =
+  get >>= \((l, b, r), i, ctr) -> liftIO (f b) >>= \b' -> put ((l, b', r), i, ctr)
 
 ------------------------------------------------------------------------------
--- | closeLoop - Handle end of loop.
-closeLoop :: ProgramState -> ProgramState
-closeLoop s = s
-    { instrPtr = case getData s of
-        0 -> instrPtr s + 1
-        _ -> fromJust $ M.lookup (instrPtr s) (snd $ instrState s)
-    , nbrOfOps = nbrOfOps s + 1
-    }
+-- | putByte - Puts a byte on standard output
+putByte :: Byte -> IO Byte
+putByte b = putChar (chr $ fromIntegral b) >> return b
 
 ------------------------------------------------------------------------------
--- | modifyDataValue - Increases or decreases the value pointed to by the
---                     data pointer.
-modifyDataValue :: (Maybe Int -> Maybe Int) -> ProgramState -> ProgramState
-modifyDataValue f s = s
-    { instrPtr  = instrPtr s + 1
-    , nbrOfOps  = nbrOfOps s + 1
-    , dataState = M.alter f (dataPtr s) (dataState s)
-    }
+-- | getByte - Gets a char from input and converts it into a Byte
+getByte :: Brainf ()
+getByte = modify (\((l, _, r), b:bs, ctr) -> ((l, b, r), bs, ctr))
 
 ------------------------------------------------------------------------------
--- | modifyDataPtr - Apply a function on the data pointer.
-modifyDataPtr :: (Int -> Int) -> ProgramState -> ProgramState
-modifyDataPtr f s = s
-    { instrPtr = instrPtr s + 1
-    , nbrOfOps = nbrOfOps s + 1
-    , dataPtr  = f $ dataPtr s
-    }
+-- | check - Get a boolean whether the current data byte is zero
+check :: Brainf Bool
+check = get >>= \((_, b, _), _, _) -> return $ b == 0
 
 ------------------------------------------------------------------------------
--- printOutput - Add the current value pointed to by the data pointer to the
---               output.
-printOutput :: ProgramState -> ProgramState
-printOutput s = s
-    { instrPtr = instrPtr s + 1
-    , nbrOfOps = nbrOfOps s + 1
-    , output   = output s ++ [chr $ getData s]
-    }
+-- | withCheck - Only execute Brainf monad if current byte is non-zero
+withCheck :: Brainf () -> Brainf ()
+withCheck bf = tick check >>= flip unless bf
 
 ------------------------------------------------------------------------------
--- readInput - Read a character from the input stream and set it as the
---             current data value.
-readInput :: ProgramState -> ProgramState
-readInput s = s
-    { instrPtr  = instrPtr s + 1
-    , nbrOfOps  = nbrOfOps s + 1
-    , dataState = M.alter (\_ -> Just d) (dataPtr s) (dataState s)
-    , input     = tail $ input s
-    }
-  where
-    d = ord $ head $ input s
+-- | loop - Loop until the current byte is zero
+loop :: [Brainf ()] -> Brainf ()
+loop body = withCheck (sequence_ body) >> withCheck (loop body)
 
-execute :: Program -> Input -> Output
-execute program = evalState brainf . initialize program
+------------------------------------------------------------------------------
+-- | brainfParser - Parse input into a Brainf operation
+brainfParser :: GenParser Char () (Brainf ())
+brainfParser = (noneOf ",.+-[]<>" $> return ())
+  <|> (char '+' $> tick (withCurrent (+1)))
+  <|> (char '-' $> tick (withCurrent (\b -> b-1)))
+  <|> (char '.' $> tick (withCurrentIO putByte))
+  <|> (char ',' $> tick getByte)
+  <|> (char '<' $> tick moveLeft)
+  <|> (char '>' $> tick moveRight)
+  <|> fmap loop (between (char '[') (char ']') (many brainfParser))
 
 play :: Handle -> IO ()
 play h = do
     [n, m]  <- fmap (map read . words) (hGetLine h)
-    input   <- fmap (take n) (hGetLine h)
-    program <- fmap (filter isCommand . unlines) (replicateM m (hGetLine h))
-    putStrLn $ execute program input
+    input   <- fmap (map (fromIntegral . ord) . take n) (hGetLine h)
+    hGetContents h >>= runProgram input >>= either print (\_ -> putStrLn "")
   where
-    isCommand :: Char -> Bool
-    isCommand c = c `elem` "+-<>.,[]"
+    parseBf :: String -> Either ParseError [Brainf ()]
+    parseBf = parse (many1 brainfParser) ""
+    outerLeft :: ParseError -> IO (Either BrainfError a)
+    outerLeft = return . Left . PError
+    outerRight :: Input -> [Brainf a] -> IO (Either BrainfError ())
+    outerRight i = runBrainf i . sequence_
+    runProgram :: Input -> String -> IO (Either BrainfError ())
+    runProgram i p = either outerLeft (outerRight i) (parseBf p)
 
 test :: FilePath -> IO ()
-test filePath = openFile filePath ReadMode >>= play
+test filepath = openFile filepath ReadMode >>= play
 
 main :: IO ()
 main = play stdin
