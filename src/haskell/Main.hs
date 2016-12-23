@@ -1,4 +1,4 @@
-import Control.Monad (when)
+import Control.Monad (unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans (MonadTrans, lift)
 import Control.Monad.Trans.Except
@@ -75,7 +75,7 @@ check = get >>= \((_, b, _), _, _) -> return $ b == 0
 ------------------------------------------------------------------------------
 -- | withCheck - Only execute Brainf monad if current byte is non-zero
 withCheck :: Brainf () -> Brainf ()
-withCheck bf = tick check >>= \b -> when (not b) bf
+withCheck bf = tick check >>= flip unless bf
 
 ------------------------------------------------------------------------------
 -- | loop - Loop until the current byte is zero
@@ -86,12 +86,12 @@ loop body = withCheck (sequence_ body) >> withCheck (loop body)
 -- | brainfParser - Parse input into a Brainf operation
 brainfParser :: GenParser Char () (Brainf ())
 brainfParser = (noneOf ",.+-[]<>" $> return ())
-  <|> (char '+' $> (tick $ withCurrent (+1)))
-  <|> (char '-' $> (tick $ withCurrent (\b -> b-1)))
-  <|> (char '.' $> (tick $ withCurrentIO putByte))
-  <|> (char ',' $> (tick $ getByte))
-  <|> (char '<' $> (tick $ moveLeft))
-  <|> (char '>' $> (tick $ moveRight))
+  <|> (char '+' $> tick (withCurrent (+1)))
+  <|> (char '-' $> tick (withCurrent (\b -> b-1)))
+  <|> (char '.' $> tick (withCurrentIO putByte))
+  <|> (char ',' $> tick getByte)
+  <|> (char '<' $> tick moveLeft)
+  <|> (char '>' $> tick moveRight)
   <|> fmap loop (between (char '[') (char ']') (many brainfParser))
 
 play :: Handle -> IO ()
