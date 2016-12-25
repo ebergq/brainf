@@ -1,20 +1,24 @@
+module Brainfuck
+    ( play
+    ) where
+
 import Control.Monad (unless, when)
-import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Trans (MonadTrans, lift)
-import Control.Monad.Trans.Except
-import Control.Monad.Trans.State
-import Data.Char
-import Data.Word
-import System.IO
+import Control.Monad.Writer (Writer, runWriter, tell)
+import Control.Monad.Trans (lift)
+import Control.Monad.Trans.Except (ExceptT, runExceptT, throwE)
+import Control.Monad.Trans.State (StateT, get, modify, put, runStateT)
+import Data.Char (chr, ord)
+import Data.Word (Word8)
 import Text.ParserCombinators.Parsec
-import Text.Parsec.Error
+import Text.Parsec.Error (ParseError)
 
 ($>) :: Functor f => f a -> b -> f b
 ($>) = flip $ fmap . const
 
 type Byte = Word8
 type Tape = ([Byte], Byte, [Byte])
-type Input = [Word8]
+type Program = String
+type Input = [Byte]
 type BrainfState = (Tape, Input, Integer)
 data BrainfError = Overflow | PError ParseError
   deriving Eq
@@ -24,13 +28,15 @@ instance Show BrainfError where
     Overflow  -> "\nPROCESS TIME OUT. KILLED!!!"
     PError pe -> "PError: " ++ show pe
 
-type Brainf a = StateT BrainfState (ExceptT BrainfError IO) a
+type Brainf a = StateT BrainfState (ExceptT BrainfError (Writer String)) a
 
-runBrainf :: Input -> Brainf a -> IO (Either BrainfError a)
-runBrainf i s = fmap (fmap fst) . runExceptT . runStateT s $ initialState
+runBrainf :: Input -> Brainf a -> String
+runBrainf i s = transform . runWriter . runExceptT . runStateT s $ initialState
   where
     initialState :: BrainfState
     initialState = ((repeat 0, 0, repeat 0), i, 0)
+    transform :: (Either BrainfError (a, BrainfState), String) -> String
+    transform (x, w) = w ++ either show (\_ -> "") x
 
 increaseCounter :: Brainf ()
 increaseCounter = modify (\(t, i, ctr) -> (t, i, ctr + 1))
@@ -52,15 +58,9 @@ withCurrent :: (Byte -> Byte) -> Brainf ()
 withCurrent f = modify (\((l, b, r), i, ctr) -> ((l, f b, r), i, ctr))
 
 ------------------------------------------------------------------------------
--- | withCurrentIO - Apply an IO operation on the byte the data pointer is at
-withCurrentIO :: (Byte -> IO Byte) -> Brainf ()
-withCurrentIO f =
-  get >>= \((l, b, r), i, ctr) -> liftIO (f b) >>= \b' -> put ((l, b', r), i, ctr)
-
-------------------------------------------------------------------------------
--- | putByte - Puts a byte on standard output
-putByte :: Byte -> IO Byte
-putByte b = putChar (chr $ fromIntegral b) >> return b
+-- | putByte - Puts the current byte on the output string
+putByte :: Brainf ()
+putByte = get >>= (\((_, b, _), _, _) -> tell [chr $ fromIntegral b])
 
 ------------------------------------------------------------------------------
 -- | getByte - Gets a char from input and converts it into a Byte
@@ -88,29 +88,20 @@ brainfParser :: GenParser Char () (Brainf ())
 brainfParser = (noneOf ",.+-[]<>" $> return ())
   <|> (char '+' $> tick (withCurrent (+1)))
   <|> (char '-' $> tick (withCurrent (\b -> b-1)))
-  <|> (char '.' $> tick (withCurrentIO putByte))
+  <|> (char '.' $> tick putByte)
   <|> (char ',' $> tick getByte)
   <|> (char '<' $> tick moveLeft)
   <|> (char '>' $> tick moveRight)
   <|> fmap loop (between (char '[') (char ']') (many brainfParser))
 
-play :: Handle -> IO ()
-play h = do
-    [n, m]  <- fmap (map read . words) (hGetLine h)
-    input   <- fmap (map (fromIntegral . ord) . take n) (hGetLine h)
-    hGetContents h >>= runProgram input >>= either print (\_ -> putStrLn "")
+play :: Program -> String -> String
+play program input = runProgram (toInput input) program
   where
+    toInput :: String -> Input
+    toInput = map $ fromIntegral . ord
     parseBf :: String -> Either ParseError [Brainf ()]
     parseBf = parse (many1 brainfParser) ""
-    outerLeft :: ParseError -> IO (Either BrainfError a)
-    outerLeft = return . Left . PError
-    outerRight :: Input -> [Brainf a] -> IO (Either BrainfError ())
+    outerRight :: Input -> [Brainf a] -> String
     outerRight i = runBrainf i . sequence_
-    runProgram :: Input -> String -> IO (Either BrainfError ())
-    runProgram i p = either outerLeft (outerRight i) (parseBf p)
-
-test :: FilePath -> IO ()
-test filepath = openFile filepath ReadMode >>= play
-
-main :: IO ()
-main = play stdin
+    runProgram :: Input -> String -> String
+    runProgram i p = either (show . PError) (outerRight i) (parseBf p)
